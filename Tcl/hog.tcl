@@ -7322,6 +7322,16 @@ proc ReadListFile {args} {
               } else {
                 set lib_name "$library$list_file_ext"
               }
+            } elseif {[IsLibero] && [IsInList $extension {.v .sv}]} {
+              # Unlike Vivado, Libero has no "others" bucket with reduced
+              # library semantics: create_links assigns every HDL file a
+              # named library regardless of language, and code elsewhere
+              # (e.g. SmartDesign component scripts hardcoding a library
+              # name) depends on Verilog files landing in the same library
+              # as everything else instead of a generic catch-all - a
+              # mismatch here doesn't error, it just makes Libero silently
+              # unable to resolve the file (e.g. from create_hdl_core) later.
+              set lib_name "$library$list_file_ext"
             } elseif {$list_file_ext == ".con"} {
               set lib_name "sources.con"
             } elseif {$list_file_ext == ".ipb"} {
@@ -7610,7 +7620,13 @@ proc SetTopProperty {top_module fileset} {
     #QUARTUS ONLY
     set_global_assignment -name TOP_LEVEL_ENTITY $top_module
   } elseif {[IsLibero]} {
-    set_root -module $top_module
+    # For a SmartDesign top module this call is expected to fail here: the
+    # SmartDesign is only rebuilt later, from Top/<project>/smartdesign/, by
+    # RebuildSmartDesign in create_project.tcl, which re-roots the project
+    # once the module actually exists. Don't abort CREATE over it.
+    if {[catch {set_root -module $top_module} err]} {
+      Msg Debug "set_root -module $top_module failed here (expected if $top_module is a SmartDesign rebuilt later): $err"
+    }
   } elseif {[IsDiamond]} {
     prj_impl option top $top_module
   }

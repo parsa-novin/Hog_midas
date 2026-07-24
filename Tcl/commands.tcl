@@ -73,6 +73,13 @@ set default_commands {
   # OPTIONS: ext_path.arg, lib.arg, vivado_only, vitis_only, verbose
   }
 
+  \^PACK$ {#proj
+    set do_pack 1
+  # NAME: PACK
+  # DESCRIPTION: Extract HDL files, constraints, and SmartDesign from a Libero project into Hog file structure. Use -recreate to overwrite existing Top directory.
+  # OPTIONS: verbose, recreate, prjx.arg
+  }
+
   \^I(MPL(EMENT(ATION)?)?)?$ {#proj
     set do_implementation 1
     set do_bitstream 1
@@ -264,4 +271,5 @@ set parameters {
   {simcheck         "If set, checks also the version of the simulation files."}
   {ci_run           "If set, CheckProjVer will run only on the projects that are active in the CI's pipeline.\n\
   It requires the glab or the gh package installed."}
+  {prjx.arg      "" "For PACK command, specify the path to the .prjx file. If not specified, searches for *.prjx in Projects/<project_name>/."}
 }

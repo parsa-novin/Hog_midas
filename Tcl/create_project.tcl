@@ -226,6 +226,15 @@ proc AddProjectFiles {} {
   ## Set synthesis TOP
   SetTopProperty $globalSettings::synth_top_module $sources
 
+  # For a SmartDesign top module, SetTopProperty above could not actually
+  # select a root (the module doesn't exist yet - see its Libero branch in
+  # hog.tcl). Rebuild it now, before constraints are added: Libero's
+  # organize_tool_files (used below to add constraints) hard-requires a
+  # root to already be selected, it will not tolerate one appearing later.
+  if {[IsLibero]} {
+    RebuildSmartDesign
+  }
+
   # Libero needs the top files to be set before adding the constraints
   AddHogFiles {*}[GetHogFiles -list_files {.con} -ext_path $globalSettings::HOG_EXTERNAL_PATH $globalSettings::list_path $globalSettings::repo_path]
   ## Set simulation Properties
@@ -233,6 +242,80 @@ proc AddProjectFiles {} {
   ## Libero Properties must be set after that root has been defined
   if {[IsLibero]} {
     ConfigureProperties
+  }
+}
+
+## @brief Recreates any Libero SmartDesign blocks cached under
+#  Top/<project>/smartdesign/ (written by "Hog/Do PACK"), so the GUI-editable
+#  SmartDesign hierarchy exists in a freshly created project exactly as it did
+#  in the original Libero project.
+#
+#  Runs after HDL files are added and the normal top-property mechanism has
+#  had its (possibly unsuccessful, for a SmartDesign top) attempt at
+#  selecting a root, but before constraints are added, since Libero requires
+#  a root to already be selected at that point. Sources only files under
+#  Top/ and src/hdl/: the original Libero project directory (Projects/) is
+#  gitignored and is not guaranteed to exist for whoever runs CREATE.
+proc RebuildSmartDesign {} {
+  set rebuild_script "$globalSettings::top_path/smartdesign/rebuild_smartdesign.tcl"
+  if {[file exists $rebuild_script]} {
+    # create_hdl_core (used by the recursive script to wrap plain HDL modules
+    # as SmartDesign-instantiable cores) silently fails - "must specify
+    # either the 'file' parameter or ..." even though -file is clearly set -
+    # unless Libero's live design hierarchy has already been (re)built after
+    # the target HDL files were imported. AddHogFiles imported them earlier
+    # in CREATE, but never itself triggers a hierarchy build, so do it here.
+    build_design_hierarchy
+    # Lets rebuild_smartdesign.tcl copy cached IP cores (see ip_cache/ next to
+    # it) straight into this fresh project's own component/ directory, the
+    # same place they'd be if this project had been built and cached before.
+    set ::HOG_SD_BUILD_DIR $globalSettings::build_dir
+    Msg Info "Rebuilding SmartDesign hierarchy from [Relative $globalSettings::repo_path $rebuild_script]..."
+    source $rebuild_script
+    Msg Info "SmartDesign hierarchy rebuilt."
+
+    # After rebuilding the SmartDesign, set the root so that organize_tool_files
+    # (called later by AddHogFiles for constraints) can succeed.
+    # organize_tool_files hard-requires a root to be selected.
+    build_design_hierarchy
+
+    # The rebuild script's own last step is set_root on the SmartDesign it
+    # just built - it knows the design's real top-level name, which
+    # synth_top_module (derived from the project directory name, e.g.
+    # "top_smm-ethercat") generally is not. If that root took, it is
+    # authoritative; the re-rooting below is only a fallback for rebuild
+    # scripts that don't root the design themselves.
+    if {![catch {set current_root [get_root]} err] && $current_root ne ""} {
+      Msg Info "Root already set by the rebuild script: $current_root"
+      return
+    }
+
+    if {[catch {set root_name $globalSettings::synth_top_module} err]} {
+      Msg Warning "Could not get synth_top_module: $err"
+      # Try to get the root from Libero's project state
+      if {![catch {set root_name [get_root]} err2]} {
+        Msg Info "Using root from get_root: $root_name"
+      } else {
+        Msg Error "Cannot determine root module for set_root"
+        return
+      }
+    }
+
+    # Set the root explicitly
+    if {[catch {set_root "${root_name}::work"} err]} {
+      Msg Warning "set_root ${root_name}::work failed: $err - trying without ::work suffix"
+      if {[catch {set_root $root_name} err2]} {
+        Msg Error "set_root failed completely: $err2"
+        return
+      }
+    }
+
+    # Verify the root is set
+    if {[catch {set verified_root [get_root]} err]} {
+      Msg Error "Root verification failed after set_root: $err"
+    } else {
+      Msg Info "Root successfully set to: $verified_root"
+    }
   }
 }
 
@@ -1224,7 +1307,7 @@ proc CreateProject {args} {
   set globalSettings::pre_bit [file normalize "${globalSettings::tcl_path}/integrated/${globalSettings::pre_bit_file}"]
   set globalSettings::post_bit [file normalize "${globalSettings::tcl_path}/integrated/${globalSettings::post_bit_file}"]
   set globalSettings::quartus_post_module [file normalize "${globalSettings::tcl_path}/integrated/${globalSettings::quartus_post_module_file}"]
-  set globalSettings::LIBERO_MANDATORY_VARIABLES {"FAMILY" "PACKAGE" "DIE" }
+  set globalSettings::LIBERO_MANDATORY_VARIABLES {"FAMILY" "PACKAGE" "DIE" "TOP"}
 
   set proj_dir [file normalize "${globalSettings::repo_path}/Top/${globalSettings::project_name}"]
   Msg Debug "Calling GetConfFiles with proj_dir=$proj_dir (project_name=${globalSettings::project_name})"

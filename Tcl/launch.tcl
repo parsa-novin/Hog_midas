@@ -135,6 +135,7 @@ set do_vhdl_ls 0
 set do_cocotb 0
 set do_hierarchy 0
 set do_version 0
+set do_pack 0
 
 set NO_DIRECTIVE_FOUND 0
 Msg Debug "Looking for a $directive in : $default_commands"
@@ -552,6 +553,26 @@ if {$cmd == -1} {
       puts "v[HexVersionToString $ver]"
     }
     exit 0
+  }
+
+  if {$do_pack == 1} {
+    # Load the pack_project utility
+    source $tcl_path/utils/pack_project.tcl
+
+    # Pack the Libero project
+    set force_overwrite 0
+    if {$options(recreate) == 1} {
+      set force_overwrite 1
+    }
+
+    # Get prjx file path if specified
+    set prjx_path ""
+    if {$options(prjx) ne ""} {
+      set prjx_path $options(prjx)
+    }
+
+    set ret [PackLiberoProject $project_name $repo_path $force_overwrite $prjx_path]
+    exit $ret
   }
 
   # if {$do_new_directive ==1 } {
