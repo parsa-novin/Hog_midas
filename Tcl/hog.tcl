@@ -1200,12 +1200,20 @@ proc CheckLatestHogRelease {{repo_path .}} {
   #We should find a proper way of checking for timeout using wait, this'll do for now
   if {[OS] == "windows"} {
     Msg Info "On windows we cannot set a timeout on 'git fetch', hopefully nothing will go wrong..."
-    Git fetch
+    ExecuteRet git fetch
   } else {
     Msg Info "Checking for latest Hog release, can take up to 5 seconds..."
     ExecuteRet timeout 5s git fetch
   }
-  set master_ver [Git "describe origin/master"]
+  # A missing or unfetched origin/master (offline machine, no auth, or a submodule
+  # cloned without the master ref) must not abort the run: this is only an
+  # "is your Hog up to date?" check. Skip it gracefully instead of erroring out.
+  lassign [GitRet "describe origin/master"] master_ret master_ver
+  if {$master_ret != 0} {
+    Msg Info "Cannot resolve origin/master in the Hog submodule; skipping Hog release check."
+    cd $old_path
+    return
+  }
   Msg Debug "Master version: $master_ver"
   set master_sha [Git "log $master_ver -1 --format=format:%H"]
   Msg Debug "Master SHA: $master_sha"
