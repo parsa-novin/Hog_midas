@@ -4939,13 +4939,18 @@ proc InitLauncher {script tcl_path parameters commands argv {custom_commands ""}
   set project [lindex $arg_list 1]
   set optional_project [IsInList $directive $directives_with_optional_projects 1]
 
+  # PACK builds Top/<project> from an external Libero project, so its target
+  # is not expected to exist yet - it must never be validated (nor abort on)
+  # a missing project, and it writes its own hog.conf as part of packing.
+  set project_creating_directive [expr {$directive eq "PACK"}]
+
   if {$argument_is_no_project == 0} {
     # Remove leading Top/ or ./Top/ if in project_name
     regsub "^(\./)?Top/" $project "" project
     # Remove trailing / and spaces if in project_name
     regsub "/? *\$" $project "" project
 
-    if {$project eq "" && $optional_project == 1} {
+    if {$project_creating_directive || ($project eq "" && $optional_project == 1)} {
       set proj_conf 0
     } else {
       set proj_conf [ProjectExists $project $repo_path]
@@ -4980,6 +4985,10 @@ proc InitLauncher {script tcl_path parameters commands argv {custom_commands ""}
         } else {
           set command "custom_tcl"
         }
+      } elseif {$project_creating_directive} {
+        # Handled as a stand-alone tclsh directive (see do_pack in launch.tcl);
+        # -3 routes to the tclsh path without demanding a pre-existing project.
+        set command -3
       } elseif {$argument_is_no_project == 1} {
         set command -4
         Msg Debug "$project will be used as first argument"
