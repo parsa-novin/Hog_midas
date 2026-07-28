@@ -17,10 +17,21 @@
 # @file
 # Pack a Libero project into Hog file structure
 # Extracts HDL files, constraints, and SmartDesign components from an existing
-# Libero .prjx file and creates the corresponding Hog list files.
+# Libero project *directory* and creates the corresponding Hog list files.
 #
-# Usage: Called from Hog/Do PACK <project_name>
-# Assumes: Projects/<project_name>/<project_name>.prjx exists
+# The Libero .prjx file is deliberately NOT read: it bakes absolute,
+# machine-specific paths and can carry stale entries (e.g. its own tooldata log
+# has been observed reporting a different die than the real device). Everything
+# is instead derived from the on-disk project/repo directory, which is the real,
+# git-tracked source of truth:
+#   - source/sim/constraint file lists : scanned from src/hdl|constraints/<project>/
+#   - device family/die/package, HDL   : Projects/<project>/smartgen/smartgen.aws
+#   - Libero version                   : Projects/<project>/libero_setup_info.txt
+#   - top module                       : passed in explicitly (never guessed)
+#   - SmartDesign DRC severities        : written to hog.conf, applied at CREATE
+#
+# Usage: Called from Hog/Do PACK <project_name> -top <top_module>
+# Assumes: Projects/<project_name>/ exists
 
 ## Helper proc to recursively copy directory contents
 proc CopyDirectory {src dst} {
@@ -92,44 +103,32 @@ proc MakeRelative {base target} {
 ## Main packing function
 ## @param[in] project_name Name of the project (e.g., "smm-ethercat")
 ## @param[in] repo_path Path to repository root
+## @param[in] top_module Top-level design unit (SmartDesign or HDL module).
+##            Passed in explicitly - never inferred from the .prjx.
 ## @param[in] force If 1, overwrite existing Top directory
-## @param[in] prjx_path Optional path to .prjx file. If empty, auto-search.
-proc PackLiberoProject {project_name repo_path {force 0} {prjx_path ""}} {
+## @param[in] project_dir Optional path to the source Libero project directory.
+##            If empty, defaults to the in-repo Projects/<project_name>/. Use it
+##            to pack an external, self-contained Libero project (one that keeps
+##            its files under <dir>/{hdl,constraint,stimulus}); those files are
+##            copied into the repo's src/ tree, which is then the truth.
+proc PackLiberoProject {project_name repo_path top_module {force 0} {project_dir ""}} {
 
-    # Find the Libero project file
-    if {$prjx_path ne ""} {
-        # User specified prjx file
-        set prjx_file [file normalize $prjx_path]
-        if {![file exists $prjx_file]} {
-            Msg Error "Specified .prjx file not found: $prjx_file"
-            return 1
-        }
-        Msg Info "Using specified Libero project: $prjx_file"
+    # The Libero project directory is the source of truth (never the .prjx).
+    if {$project_dir ne ""} {
+        set project_location [file normalize $project_dir]
     } else {
-        # Auto-search for prjx file
-        set project_dir "$repo_path/Projects/$project_name"
-        set prjx_candidates [glob -nocomplain "$project_dir/*.prjx" "$project_dir/*/*.prjx"]
-
-        if {[llength $prjx_candidates] == 0} {
-            Msg Error "No .prjx file found in $project_dir"
-            Msg Info "Use -prjx option to specify the path to your .prjx file"
-            return 1
-        }
-
-        if {[llength $prjx_candidates] > 1} {
-            Msg Warning "Multiple .prjx files found:"
-            foreach candidate $prjx_candidates {
-                Msg Warning "  - $candidate"
-            }
-            Msg Warning "Using first one. Use -prjx option to specify a different file."
-        }
-
-        # Use the first .prjx found
-        set prjx_file [lindex $prjx_candidates 0]
-        set prjx_file [file normalize $prjx_file]
-
-        Msg Info "Found Libero project: $prjx_file"
+        set project_location [file normalize "$repo_path/Projects/$project_name"]
     }
+    if {![file isdirectory $project_location]} {
+        Msg Error "Libero project directory not found: $project_location"
+        return 1
+    }
+    if {[string trim $top_module] eq ""} {
+        Msg Error "PACK requires the top module: pass it with -top <module_name>"
+        return 1
+    }
+    Msg Info "Packing Libero project directory: $project_location"
+    Msg Info "Top module (explicit): $top_module"
 
     # Create output directory
     set top_dir "$repo_path/Top/$project_name"
@@ -150,246 +149,127 @@ proc PackLiberoProject {project_name repo_path {force 0} {prjx_path ""}} {
         Msg Info "Created directory: $top_dir"
     }
 
-    # Open and parse the project file
-    set file [open $prjx_file r]
-    set content [read $file]
-    close $file
+    # ---- Project settings: read from the directory, never the .prjx ----------
 
-    # Parse key project parameters
-    set top_module ""
+    # Libero version: from libero_setup_info.txt ("Libero Release : 2026.1").
+    set libero_version ""
+    set setup_info "$project_location/libero_setup_info.txt"
+    if {[file exists $setup_info]} {
+        set fh [open $setup_info r]
+        set si [read $fh]
+        close $fh
+        regexp -line {^Libero Release\s*:\s*(\S+)} $si -> libero_version
+    }
+
+    # Device + HDL type: from smartgen/smartgen.aws, whose <device .../> is the
+    # authoritative on-disk record (the tooldata log has been seen to disagree
+    # with, and be wrong versus, the real device - so it is not trusted).
     set device_family ""
     set device_die ""
     set device_package ""
     set hdl_mode "VERILOG"
-    set libero_version ""
-    set project_location [file dirname $prjx_file]
-
-    # Extract project settings
-    foreach line [split $content "\n"] {
-        if {[regexp {^KEY LIBERO \"([^\"]+)\"} $line -> value]} {
-            set libero_version $value
-        }
-        if {[regexp {^KEY ActiveRoot \"([^\"]+)\"} $line -> value]} {
-            set top_module [string range $value 0 [expr {[string first "::" $value] - 1}]]
-        }
-        if {[regexp {^KEY VendorTechnology_Family \"?([^\"]*)\"?} $line -> value]} {
-            set device_family $value
-        }
-        if {[regexp {^KEY VendorTechnology_Die \"?([^\"]*)\"?} $line -> value]} {
-            set device_die $value
-        }
-        if {[regexp {^KEY VendorTechnology_Package \"?([^\"]*)\"?} $line -> value]} {
-            set device_package $value
-        }
-        if {[regexp {^KEY HDLTechnology \"?([^\"]*)\"?} $line -> value]} {
-            set hdl_mode $value
-        }
+    set aws_file "$project_location/smartgen/smartgen.aws"
+    if {[file exists $aws_file]} {
+        set fh [open $aws_file r]
+        set aws [read $fh]
+        close $fh
+        regexp {<device\s+die="([^"]*)"\s+family="([^"]*)"\s+package="([^"]*)"} \
+            $aws -> device_die device_family device_package
+        regexp {<hdltype>([^<]*)</hdltype>} $aws -> hdl_mode
+    } else {
+        Msg Warning "smartgen.aws not found at $aws_file - device family/die/package will be empty in hog.conf"
     }
 
     Msg Info "Top Module: $top_module"
     Msg Info "Device: $device_family $device_die $device_package"
     Msg Info "HDL Mode: $hdl_mode"
 
-    # Initialize file storage dictionaries
-    set src_files_by_lib [dict create]
-    set sim_files_by_lib [dict create]
-    set con_files [list]
-
-    # Parse FileManager section
-    set in_file_manager 0
-    set lines [split $content "\n"]
-    set i 0
-    set num_lines [llength $lines]
-
-    while {$i < $num_lines} {
-        set line [lindex $lines $i]
-
-        # Detect FileManager section
-        if {[regexp {^LIST FileManager} $line]} {
-            set in_file_manager 1
-            incr i
-            continue
-        }
-
-        if {[regexp {^ENDLIST} $line] && $in_file_manager} {
-            set in_file_manager 0
-            break
-        }
-
-        # Extract file entries
-        if {$in_file_manager && [regexp {^VALUE \"([^\"]+)} $line -> value]} {
-            lassign [split $value ,] file_path file_type
-
-            # Replace <project> placeholder
-            set file_path [string map [list "<project>" $project_location] $file_path]
-
-            # Extract file properties
-            set library "work"
-            set parent_file ""
-
-            # Read subsequent lines for this file
-            incr i
-            while {$i < $num_lines} {
-                set prop_line [lindex $lines $i]
-
-                if {[regexp {^ENDFILE} $prop_line]} {
-                    break
-                }
-                if {[regexp {^LIBRARY=\"([^\"]+)} $prop_line -> lib_value]} {
-                    set library $lib_value
-                }
-                if {[regexp {^PARENT=\"([^\"]+)} $prop_line -> parent_value]} {
-                    if {$parent_file == ""} {
-                        set parent_file $parent_value
-                    }
-                }
-
-                incr i
-            }
-
-            # Only process files without a parent (top-level user files)
-            if {$parent_file == ""} {
-                # Determine file category
-                if {$file_type == "hdl"} {
-                    # HDL source file
-                    if {![dict exists $src_files_by_lib $library]} {
-                        dict set src_files_by_lib $library [list]
-                    }
-                    dict lappend src_files_by_lib $library [list $file_path $top_module]
-
-                } elseif {$file_type == "tb_hdl"} {
-                    # Simulation HDL file
-                    if {![dict exists $sim_files_by_lib $library]} {
-                        dict set sim_files_by_lib $library [list]
-                    }
-                    dict lappend sim_files_by_lib $library $file_path
-
-                } elseif {$file_type == "io_pdc" || $file_type == "sdc" || $file_type == "pdc"} {
-                    # Constraint file
-                    lappend con_files $file_path
-                }
-            }
-        }
-
-        incr i
+    # ---- Populate src/ from the project, then scan src/ as the truth ---------
+    # A self-contained Libero project keeps its files under Projects/<p>/{hdl,
+    # constraint,stimulus}; copy anything present into the repo's src/ tree so
+    # the scans below see a complete set. (When the project already references
+    # files straight out of src/ these copies are simple no-ops.) Projects/ is
+    # gitignored, so src/ is the permanent home the list files must point at.
+    set src_hdl_dir "$repo_path/src/hdl/$project_name"
+    set src_con_dir "$repo_path/src/constraints/$project_name"
+    if {[file isdirectory "$project_location/hdl"]} {
+        CopyDirectory "$project_location/hdl" $src_hdl_dir
+    }
+    if {[file isdirectory "$project_location/constraint"]} {
+        CopyDirectory "$project_location/constraint" $src_con_dir
+    }
+    if {[file isdirectory "$project_location/stimulus"]} {
+        CopyDirectory "$project_location/stimulus" "$src_hdl_dir/stimulus"
     }
 
-    Msg Info "Writing Hog List Files..."
-
-    # Create list subdirectory
+    Msg Info "Writing Hog List Files (from the src/ directory)..."
     set list_dir "$top_dir/list"
     file mkdir $list_dir
 
-    # Write source list files (one per library). The file's basename becomes
-    # the Libero library name Hog imports it under (AddHogFiles derives it
-    # via [file rootname [file tail <list file>]]) - it must be exactly
-    # $library, with no extra suffix, or it stops matching the -library
-    # value hardcoded into the SmartDesign component scripts (which comes
-    # from the *real* library name recorded in the original project's
-    # FileManager, e.g. "work"), and create_hdl_core then can't resolve the
-    # file at all: it silently behaves as if -file were never given.
-    dict for {library file_list} $src_files_by_lib {
-        set list_file "$list_dir/${library}.src"
-        set fp [open $list_file w]
+    # Everything under src/hdl/<project>/ is imported into the "work" library:
+    # the SmartDesign component scripts hardcode -library {work}, and the list
+    # file's basename becomes the import library name (AddHogFiles derives it
+    # via [file rootname [file tail <list file>]]). Kept as a one-entry dict so
+    # the generated-core append further below can still find the primary .src.
+    set src_files_by_lib [dict create work [list]]
 
-        foreach file_entry $file_list {
-            set file_path [lindex $file_entry 0]
-            set top [lindex $file_entry 1]
-
-            # Map from project location to src/ structure
-            # ANY/PATH/TO/PROJECT/hdl/file.vhd -> src/hdl/<project_name>/file.vhd
-            # This remaps files to Hog's src/ convention (Projects/ is gitignored)
-
-            # First try to extract relative path from file_path directly
-            # Look for /hdl/ or \hdl\ in the absolute path
-            set hdl_subpath ""
-            if {[regexp {[/\\]hdl[/\\](.*)$} $file_path -> hdl_subpath]} {
-                # Found /hdl/ in path, use everything after it
-                # Normalize path separators to forward slashes
-                set hdl_subpath [string map {\\ /} $hdl_subpath]
-                set rel_path "src/hdl/$project_name/$hdl_subpath"
-            } else {
-                # Fallback: use relative path if files are in repo
-                set rel_path [MakeRelative $repo_path $file_path]
-            }
-
-            # Check if this is the top module (only if file exists at original location)
-            if {[file exists $file_path]} {
-                set module_name [GetModuleName $file_path]
-                if {$module_name == [string tolower $top] && $top != ""} {
-                    puts $fp "$rel_path top=$top"
-                } else {
-                    puts $fp $rel_path
-                }
-            } else {
-                puts $fp $rel_path
-            }
+    # work.src: every HDL file under src/hdl/<project>/, except the testbench
+    # files under stimulus/ (they go to work.sim) and any generated-core output
+    # under generated_cores/ (the SmartDesign section appends those itself).
+    set src_list "$list_dir/work.src"
+    set fp [open $src_list w]
+    set src_count 0
+    foreach f [lsort -nocase [FindHdlFiles $src_hdl_dir]] {
+        set rel [MakeRelative $repo_path $f]
+        if {[regexp {(^|/)stimulus/} $rel] || [regexp {(^|/)generated_cores/} $rel]} {
+            continue
         }
-
-        close $fp
-        Msg Info "Created: $list_file ([llength $file_list] files)"
+        # Tag the top module's file so CREATE's SetTopProperty can find it.
+        # For a SmartDesign top, no HDL file matches (the root is (re)built and
+        # rooted by rebuild_smartdesign.tcl instead), so no line is tagged.
+        if {[GetModuleName $f] eq [string tolower $top_module]} {
+            puts $fp "$rel top=$top_module"
+        } else {
+            puts $fp $rel
+        }
+        incr src_count
+    }
+    close $fp
+    Msg Info "Created: $src_list ($src_count files)"
+    if {$src_count == 0} {
+        Msg CriticalWarning "No HDL files found under $src_hdl_dir - work.src is empty. Are the source\
+        files present in the repo's src/hdl/$project_name/ directory?"
     }
 
-    # Write simulation list files (one per library). Same naming rule as the
-    # .src list files above: the basename becomes the Libero library name.
-    dict for {library file_list} $sim_files_by_lib {
-        set list_file "$list_dir/${library}.sim"
-        set fp [open $list_file w]
-
-        foreach file_path $file_list {
-            # Remap simulation files to src/ structure. Stimulus/testbench
-            # files sit in their own directory alongside hdl/ and constraint/
-            # in the original project, not inside hdl/ itself, so they need
-            # the same treatment or they fall through to the generic
-            # MakeRelative case below - which, since the source path is
-            # inside Projects/, would bake a literal Projects/ reference into
-            # a checked-in list file, pointing at a directory that only
-            # exists on the machine PACK was run on.
-            set sub_path ""
-            if {[regexp {[/\\]hdl[/\\](.*)$} $file_path -> sub_path]} {
-                set sub_path [string map {\\ /} $sub_path]
-                set rel_path "src/hdl/$project_name/$sub_path"
-            } elseif {[regexp {[/\\]stimulus[/\\](.*)$} $file_path -> sub_path]} {
-                set sub_path [string map {\\ /} $sub_path]
-                set rel_path "src/hdl/$project_name/stimulus/$sub_path"
-            } else {
-                set rel_path [MakeRelative $repo_path $file_path]
-                if {[string first "$repo_path/Projects" [file normalize $file_path]] == 0} {
-                    Msg CriticalWarning "Simulation file $file_path is neither under hdl/ nor stimulus/ in the\
-                    original project, so it could not be remapped into src/. It will be left out of\
-                    $list_file: add it manually if it's needed for simulation."
-                    continue
-                }
+    # work.sim: testbench/stimulus HDL under src/hdl/<project>/stimulus/.
+    set sim_dir "$src_hdl_dir/stimulus"
+    if {[file isdirectory $sim_dir]} {
+        set sim_files [lsort -nocase [FindHdlFiles $sim_dir]]
+        if {[llength $sim_files] > 0} {
+            set sim_list "$list_dir/work.sim"
+            set fp [open $sim_list w]
+            foreach f $sim_files {
+                puts $fp [MakeRelative $repo_path $f]
             }
-
-            puts $fp $rel_path
+            close $fp
+            Msg Info "Created: $sim_list ([llength $sim_files] files)"
         }
-
-        close $fp
-        Msg Info "Created: $list_file ([llength $file_list] files)"
     }
 
-    # Write constraint list file
-    if {[llength $con_files] > 0} {
-        set list_file "$list_dir/main_constraints.con"
-        set fp [open $list_file w]
-
-        foreach file_path $con_files {
-            # Remap constraint files to src/ structure
-            set con_subpath ""
-            if {[regexp {[/\\]constraint[/\\](.*)$} $file_path -> con_subpath]} {
-                # Normalize path separators to forward slashes
-                set con_subpath [string map {\\ /} $con_subpath]
-                set rel_path "src/constraints/$project_name/$con_subpath"
-            } else {
-                set rel_path [MakeRelative $repo_path $file_path]
+    # main_constraints.con: every .sdc/.pdc under src/constraints/<project>/,
+    # recursively across all subdirectories (io/, fp/, ...). Non-constraint
+    # helpers (.def/.tcl) are filtered out by extension.
+    if {[file isdirectory $src_con_dir]} {
+        set con_files [lsort -nocase [FindFilesByExt $src_con_dir {.sdc .pdc}]]
+        if {[llength $con_files] > 0} {
+            set con_list "$list_dir/main_constraints.con"
+            set fp [open $con_list w]
+            foreach f $con_files {
+                puts $fp [MakeRelative $repo_path $f]
             }
-
-            puts $fp $rel_path
+            close $fp
+            Msg Info "Created: $con_list ([llength $con_files] files)"
         }
-
-        close $fp
-        Msg Info "Created: $list_file ([llength $con_files] files)"
     }
 
     # Find and copy SmartDesign TCL reconstruction scripts (if they exist).
@@ -639,7 +519,7 @@ proc PackLiberoProject {project_name repo_path {force 0} {prjx_path ""}} {
                         }
                         if {$catalog_complete} {
                             Msg Debug "$cac_name ($cac_vlnv) has complete cached catalog data - keeping\
-                            create_and_configure_core, cached via core_vlnvs/ip_cache below"
+                            create_and_configure_core; the core is fetched via download_core at CREATE"
                         } else {
                             Msg Warning "No cached catalog data or generated output found for $cac_name at\
                             $gen_dir - CREATE will have to get $cac_vlnv from Libero's catalog or download_core"
@@ -713,49 +593,15 @@ proc PackLiberoProject {project_name repo_path {force 0} {prjx_path ""}} {
                 Msg Info "Added [llength $generated_hdl_files] generated-core HDL file(s) to ${primary_library}.src"
             }
 
-            # Cache each IP core that still needs create_and_configure_core
-            # (no generated output was found for it above) under
-            # smartdesign/ip_cache/, so a fresh CREATE can restore it straight
-            # into the new project's own component/ directory instead of
-            # depending on create_and_configure_core finding it in Libero's
-            # local catalog, or on a "Hog/Do PACK"-time download_core call.
-            set ip_cache_dir "$top_dir/smartdesign/ip_cache"
-            set cached_vlnvs [list]
-            # Vault-resident cores cached below keep their vault directory
-            # format (fs/p0/pkg with the generator inside), which only works
-            # restored back into a vault - never into component/. The rebuild
-            # script uses this list to tell the two apart.
-            set vault_cached_vlnvs [list]
-            foreach vlnv $core_vlnvs {
-                set vlnv_parts [split $vlnv ":"]
-                if {[llength $vlnv_parts] != 4} {
-                    Msg Warning "Core VLNV '$vlnv' doesn't look like vendor:library:name:version, skipping cache"
-                    continue
-                }
-                lassign $vlnv_parts core_vendor core_lib core_name core_ver
-                set from_vault 0
-                if {[lsearch -exact $vault_vlnvs $vlnv] >= 0} {
-                    set core_src [file join $::env(HOME) .actel vault Components \
-                        $core_vendor $core_lib $core_name $core_ver]
-                    set from_vault 1
-                } else {
-                    set core_src "$project_location/component/$core_vendor/$core_lib/$core_name/$core_ver"
-                }
-                if {[file exists $core_src]} {
-                    set core_dst "$ip_cache_dir/$core_vendor/$core_lib/$core_name/$core_ver"
-                    CopyDirectory $core_src $core_dst
-                    lappend cached_vlnvs $vlnv
-                    if {$from_vault} {
-                        lappend vault_cached_vlnvs $vlnv
-                    }
-                } else {
-                    Msg Warning "IP core $vlnv not found at $core_src, cannot cache it - CREATE will have to fetch\
-                    it from Libero's catalog or download_core instead"
-                }
-            }
-            if {[llength $cached_vlnvs] > 0} {
-                Msg Info "Cached [llength $cached_vlnvs] IP core(s) to $ip_cache_dir"
-            }
+            # IP-core caching is intentionally disabled: cores are fetched at
+            # CREATE time by download_core (see the rebuild script emitted
+            # below) instead of being restored from a committed ip_cache/ copy.
+            # This keeps the repo free of the multi-MB vendor vault and follows
+            # Hog's documented Libero flow (download_core followed by
+            # create_and_configure_core). It requires the Libero IP catalog to
+            # be reachable at CREATE time.
+            # https://hog.readthedocs.io/en/latest/02-User-Manual/01-Hog-local/13-Libero.html
+            Msg Info "IP-core caching disabled - [llength $core_vlnvs] core(s) will be fetched via download_core at CREATE"
 
             # Copy the main recursive TCL (if it exists), adapting it to run
             # standalone from Top/<project>/smartdesign/ instead of from
@@ -874,86 +720,45 @@ proc PackLiberoProject {project_name repo_path {force 0} {prjx_path ""}} {
             puts $fp "set script_dir \[file dirname \[info script\]\]"
             puts $fp "set ::HOG_SD_HDL_DIR \[file normalize \[file join \$script_dir .. .. .. src hdl $project_name\]\]"
             puts $fp ""
-            # Carry over the original project's SmartDesign DRC severity
-            # settings: with cores rebuilt as static HDL wrappers (whose
-            # interfaces expose no memory-map ranges) generate_component's
-            # memory-map DRC reports empty target ranges as hard errors,
-            # and the original project itself shipped with these DRCs
-            # downgraded to warnings. This has to happen before the
-            # SmartDesign is generated, so hog.conf's [project] section
-            # (applied only after the rebuild) is too late for it.
-            set fh [open $prjx_file r]
-            set prjx_content [read $fh]
-            close $fh
-            set drc_map {
-                MemoryMapDrcSeverity memory_map_drc_change_error_to_warning
-                LossOfDataDRCSeverity bus_interface_data_width_drc_change_error_to_warning
-                IdWidthMismatchDRCSeverity bus_interface_id_width_drc_change_error_to_warning
-            }
-            set drc_args [list]
-            foreach {prjx_key setting_name} $drc_map {
-                if {[regexp "$prjx_key \"(TRUE|FALSE)\"" $prjx_content -> drc_val]} {
-                    # Value must be the literal string TRUE/FALSE: the
-                    # smartdesign command accepts (doesn't error on) other
-                    # spellings like 1/0 but silently stores them as FALSE.
-                    lappend drc_args "-${setting_name} $drc_val"
-                }
-            }
-            if {[llength $drc_args] > 0} {
-                puts $fp "# SmartDesign DRC severities, carried over from the original project."
-                puts $fp "# One single call on purpose: every smartdesign invocation resets the"
-                puts $fp "# options it wasn't given back to their defaults, so issuing these as"
-                puts $fp "# separate calls leaves only the last one actually applied."
-                puts $fp "smartdesign [join $drc_args " "]"
-                puts $fp ""
-            }
+            # SmartDesign DRC severities: with cores rebuilt as static HDL
+            # wrappers (whose interfaces expose no memory-map ranges)
+            # generate_component's memory-map DRC reports empty target ranges
+            # as hard errors, and these DRCs are shipped downgraded to
+            # warnings. The values are NOT read from the .prjx - they live in
+            # hog.conf's [smartdesign] section (written by PACK, git-tracked)
+            # and are read here at CREATE time from $globalSettings::PROPERTIES.
+            # They must be applied before generate_component runs, which is why
+            # this rebuild script - sourced before ConfigureProperties - does it,
+            # rather than hog.conf's [project] section: ConfigureProperties runs
+            # too late AND would try to feed these smartdesign-only options to
+            # project_settings, which rejects them.
+            puts $fp "# SmartDesign DRC severities, read from hog.conf's \[smartdesign\] section."
+            puts $fp "# One single smartdesign call on purpose: every invocation resets the"
+            puts $fp "# options it wasn't given back to their defaults, so separate calls would"
+            puts $fp "# leave only the last one actually applied."
+            puts $fp {if {[info exists ::globalSettings::PROPERTIES] && [dict exists $::globalSettings::PROPERTIES smartdesign]} {
+    set _hog_sd_args [list]
+    dict for {_k _v} [dict get $::globalSettings::PROPERTIES smartdesign] {
+        lappend _hog_sd_args "-$_k" [string toupper $_v]
+    }
+    if {[llength $_hog_sd_args] > 0} {
+        smartdesign {*}$_hog_sd_args
+    }
+}}
+            puts $fp ""
             if {[llength $core_vlnvs] > 0} {
                 puts $fp "# Make sure every IP core this design's components reference is"
-                puts $fp "# present in this (freshly created, empty) project's own"
-                puts $fp "# component/ directory before anything tries to use them:"
-                puts $fp "# create_and_configure_core only ever uses what's already in the"
-                puts $fp "# local catalog, and fails with \"Cannot find Spirit core"
-                puts $fp "# configuration file...\" for anything missing. Restoring the copy"
-                puts $fp "# cached under ip_cache/ (by Hog/Do PACK, from a project where this"
-                puts $fp "# core was already known to work) is preferred over download_core:"
-                puts $fp "# it needs no network access at build time, and download_core has"
-                puts $fp "# been observed to silently report success without actually"
-                puts $fp "# depositing a usable core for at least one core/version - it's"
-                puts $fp "# kept only as a best-effort fallback for cores that weren't cached."
-                puts $fp "set ip_cache_dir \[file join \$script_dir ip_cache\]"
+                puts $fp "# present in this (freshly created, empty) project before anything"
+                puts $fp "# tries to use it: create_and_configure_core only ever uses what's"
+                puts $fp "# already in the local catalog/vault and fails with \"Cannot find"
+                puts $fp "# Spirit core configuration file...\" for anything missing. Each core"
+                puts $fp "# is fetched from Libero's IP catalog with download_core, per Hog's"
+                puts $fp "# documented Libero flow, instead of being restored from a committed"
+                puts $fp "# ip_cache/ copy. This requires the Libero IP catalog to be reachable"
+                puts $fp "# at CREATE time."
+                puts $fp "# https://hog.readthedocs.io/en/latest/02-User-Manual/01-Hog-local/13-Libero.html"
                 foreach vlnv $core_vlnvs {
-                    set vlnv_parts [split $vlnv ":"]
-                    lassign $vlnv_parts core_vendor core_lib core_name core_ver
-                    set cache_rel "$core_vendor/$core_lib/$core_name/$core_ver"
-                    if {[lsearch -exact $vault_cached_vlnvs $vlnv] >= 0} {
-                        # Vault-format cache (fs/p0/pkg + generator): only a
-                        # vault restore makes create_and_configure_core see
-                        # it - dropping it into component/ does nothing. If
-                        # this machine's vault already has this exact
-                        # version, leave it alone.
-                        puts $fp "set hog_vault_dst \[file join \$::env(HOME) .actel vault Components\
-                            $core_vendor $core_lib $core_name\]"
-                        puts $fp "if {!\[file exists \[file join \$hog_vault_dst $core_ver\]\]} {"
-                        puts $fp "    if {\[file exists \[file join \$ip_cache_dir $cache_rel\]\]} {"
-                        puts $fp "        file mkdir \$hog_vault_dst"
-                        puts $fp "        file copy -force \[file join \$ip_cache_dir $cache_rel\]\
-                            \[file join \$hog_vault_dst $core_ver\]"
-                        puts $fp "    } else {"
-                        puts $fp "        catch {download_core -vlnv {$vlnv}}"
-                        puts $fp "    }"
-                        puts $fp "}"
-                    } elseif {[lsearch -exact $cached_vlnvs $vlnv] >= 0} {
-                        puts $fp "if {\[file exists \[file join \$ip_cache_dir $cache_rel\]\]} {"
-                        puts $fp "    file mkdir \[file join \$::HOG_SD_BUILD_DIR component\
-                            $core_vendor $core_lib $core_name\]"
-                        puts $fp "    file copy -force \[file join \$ip_cache_dir $cache_rel\]\
-                            \[file join \$::HOG_SD_BUILD_DIR component $cache_rel\]"
-                        puts $fp "} else {"
-                        puts $fp "    catch {download_core -vlnv {$vlnv}}"
-                        puts $fp "}"
-                    } else {
-                        puts $fp "catch {download_core -vlnv {$vlnv}}"
-                    }
+                    puts $fp "download_core -vlnv {$vlnv}"
                 }
                 puts $fp ""
             }
@@ -984,7 +789,7 @@ proc PackLiberoProject {project_name repo_path {force 0} {prjx_path ""}} {
         puts $fp "#libero $libero_version"
     } else {
         puts $fp "#libero 2026.1"
-        Msg Warning "Could not detect Libero version from .prjx, defaulting to 2026.1"
+        Msg Warning "Could not detect Libero version from libero_setup_info.txt, defaulting to 2026.1"
     }
     puts $fp ""
     puts $fp "\[main\]"
@@ -1000,6 +805,17 @@ proc PackLiberoProject {project_name repo_path {force 0} {prjx_path ""}} {
     puts $fp ""
     puts $fp "\[project\]"
     puts $fp ""
+    # SmartDesign DRC severities live here (git-tracked, explicit) instead of
+    # being read from the untrusted .prjx. They are consumed at CREATE time by
+    # smartdesign/rebuild_smartdesign.tcl (which reads this section from
+    # $globalSettings::PROPERTIES) before the design is generated - not by
+    # ConfigureProperties, which handles [project]/[synth]/[impl] and would
+    # reject these smartdesign-only options. Values must be literal TRUE/FALSE.
+    puts $fp "\[smartdesign\]"
+    puts $fp "memory_map_drc_change_error_to_warning = TRUE"
+    puts $fp "bus_interface_data_width_drc_change_error_to_warning = TRUE"
+    puts $fp "bus_interface_id_width_drc_change_error_to_warning = TRUE"
+    puts $fp ""
     puts $fp "\[synth\]"
     puts $fp "# Synthesis settings"
     puts $fp ""
@@ -1009,34 +825,12 @@ proc PackLiberoProject {project_name repo_path {force 0} {prjx_path ""}} {
     close $fp
     Msg Info "Created: $conf_file"
 
-    # Auto-copy source files to src/ directory structure
-    Msg Info "Copying source files to src/ directory..."
-
-    # Copy HDL files
-    set src_hdl_dir "$repo_path/src/hdl/$project_name"
-    if {[file exists "$project_location/hdl"]} {
-        CopyDirectory "$project_location/hdl" $src_hdl_dir
-        Msg Info "Copied HDL files to $src_hdl_dir"
-    }
-
-    # Copy constraint files
-    set src_con_dir "$repo_path/src/constraints/$project_name"
-    if {[file exists "$project_location/constraint"]} {
-        CopyDirectory "$project_location/constraint" $src_con_dir
-        Msg Info "Copied constraint files to $src_con_dir"
-    }
-
-    # Copy stimulus/testbench files (see the .sim list-writing loop above,
-    # which remaps their list-file entries to this same src/hdl/.../stimulus
-    # location)
-    if {[file exists "$project_location/stimulus"]} {
-        CopyDirectory "$project_location/stimulus" "$src_hdl_dir/stimulus"
-        Msg Info "Copied stimulus files to $src_hdl_dir/stimulus"
-    }
+    # (Source files were already copied into src/ and scanned near the top of
+    # this proc - src/ is the truth the list files point at.)
 
     Msg Status "=== Conversion Complete ==="
     Msg Status "Hog project created in: $top_dir"
-    Msg Status "Source files copied to:"
+    Msg Status "Source files under:"
     Msg Status "  - HDL: $src_hdl_dir"
     Msg Status "  - Constraints: $src_con_dir"
     Msg Status ""

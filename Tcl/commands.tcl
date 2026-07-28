@@ -76,8 +76,8 @@ set default_commands {
   \^PACK$ {#proj
     set do_pack 1
   # NAME: PACK
-  # DESCRIPTION: Extract HDL files, constraints, and SmartDesign from a Libero project into Hog file structure. Use -recreate to overwrite existing Top directory.
-  # OPTIONS: verbose, recreate, prjx.arg
+  # DESCRIPTION: Extract HDL files, constraints, and SmartDesign from a Libero project directory into Hog file structure. Requires -top <module>. Use -recreate to overwrite existing Top directory.
+  # OPTIONS: verbose, recreate, top.arg, project_dir.arg
   }
 
   \^I(MPL(EMENT(ATION)?)?)?$ {#proj
@@ -271,5 +271,6 @@ set parameters {
   {simcheck         "If set, checks also the version of the simulation files."}
   {ci_run           "If set, CheckProjVer will run only on the projects that are active in the CI's pipeline.\n\
   It requires the glab or the gh package installed."}
-  {prjx.arg      "" "For PACK command, specify the path to the .prjx file. If not specified, searches for *.prjx in Projects/<project_name>/."}
+  {top.arg       "" "For PACK command, the top-level module (SmartDesign or HDL) of the project. Required - PACK derives everything else from the source Libero project directory and never reads the .prjx."}
+  {project_dir.arg "" "For PACK command, path to the source Libero project directory to pack from. Defaults to Projects/<project_name>/. Point it at an external self-contained Libero project (with hdl/, constraint/, stimulus/ subdirs) to import it into the repo."}
 }

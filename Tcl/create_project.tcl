@@ -266,9 +266,10 @@ proc RebuildSmartDesign {} {
     # the target HDL files were imported. AddHogFiles imported them earlier
     # in CREATE, but never itself triggers a hierarchy build, so do it here.
     build_design_hierarchy
-    # Lets rebuild_smartdesign.tcl copy cached IP cores (see ip_cache/ next to
-    # it) straight into this fresh project's own component/ directory, the
-    # same place they'd be if this project had been built and cached before.
+    # Retained for backward compatibility with older rebuild scripts. Cores
+    # are now fetched by download_core (see rebuild_smartdesign.tcl), which
+    # populates the Libero catalog/vault directly, so this is no longer used
+    # by the currently generated rebuild script.
     set ::HOG_SD_BUILD_DIR $globalSettings::build_dir
     Msg Info "Rebuilding SmartDesign hierarchy from [Relative $globalSettings::repo_path $rebuild_script]..."
     source $rebuild_script

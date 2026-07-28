@@ -565,13 +565,25 @@ if {$cmd == -1} {
       set force_overwrite 1
     }
 
-    # Get prjx file path if specified
-    set prjx_path ""
-    if {$options(prjx) ne ""} {
-      set prjx_path $options(prjx)
+    # Top module is required and passed in explicitly (never inferred from the
+    # .prjx). PACK derives everything else from the project/repo directory.
+    set top_module ""
+    if {$options(top) ne ""} {
+      set top_module $options(top)
+    }
+    if {$top_module eq ""} {
+      Msg Error "PACK requires the top module: use -top <module_name>"
+      exit 1
     }
 
-    set ret [PackLiberoProject $project_name $repo_path $force_overwrite $prjx_path]
+    # Optional external source Libero project directory. If not given, PACK
+    # reads from the in-repo Projects/<project>/.
+    set project_dir ""
+    if {$options(project_dir) ne ""} {
+      set project_dir $options(project_dir)
+    }
+
+    set ret [PackLiberoProject $project_name $repo_path $top_module $force_overwrite $project_dir]
     exit $ret
   }
 
