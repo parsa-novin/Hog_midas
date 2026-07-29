@@ -245,6 +245,51 @@ proc AddProjectFiles {} {
   }
 }
 
+## @brief Expresses an HDL file cached under src/hdl/<project>/ in the form
+#  Libero's sd_instantiate_hdl_module accepts, i.e. relative to the Libero
+#  project directory.
+#
+#  Libero (checked on SoC 2025.2) resolves sd_instantiate_hdl_module's
+#  -hdl_file argument relative to the project directory and rejects anything
+#  it cannot resolve that way - including absolute paths, even the correct
+#  absolute path to a file already imported into the project's own hdl/
+#  directory. Worse, it reports the resolution failure as
+#
+#      You cannot instantiate a sub-module '<module>' of HDL module.
+#      You need to instantiate top module.
+#
+#  which describes a completely different problem and is emitted even for a
+#  module that is nobody's sub-module.
+#
+#  create_hdl_core's -file argument has no such restriction, so only the
+#  sd_instantiate_hdl_module call sites written by PACK go through here.
+#
+#  @param[in] name  path of the HDL file relative to src/hdl/<project>/
+#
+#  @return $name relative to the Libero project directory, or unchanged (as
+#          an absolute path) if no relative path between the two exists
+proc HogSdHdlFile {name} {
+  set abs [file normalize [file join $::HOG_SD_HDL_DIR $name]]
+  if {![info exists ::HOG_SD_BUILD_DIR]} {
+    return $abs
+  }
+  set build_dir [file normalize $::HOG_SD_BUILD_DIR]
+  set rel [Relative $build_dir $abs 1]
+  # Relative cannot signal "no such path" for two absolute paths on different
+  # Windows volumes - it returns a ../-prefixed string that resolves nowhere.
+  # Round-tripping it is what actually catches that.
+  if {$rel eq "" || [file normalize [file join $build_dir $rel]] ne $abs} {
+    Msg CriticalWarning "No relative path exists between the Libero project\
+      directory $build_dir and $abs (different volumes?).\
+      sd_instantiate_hdl_module only accepts project-relative -hdl_file paths\
+      and will reject the absolute one with a misleading \"cannot instantiate\
+      a sub-module\" error. Put the project build directory on the same volume\
+      as the repository."
+    return $abs
+  }
+  return $rel
+}
+
 ## @brief Recreates any Libero SmartDesign blocks cached under
 #  Top/<project>/smartdesign/ (written by "Hog/Do PACK"), so the GUI-editable
 #  SmartDesign hierarchy exists in a freshly created project exactly as it did
@@ -271,7 +316,44 @@ proc RebuildSmartDesign {} {
     # same place they'd be if this project had been built and cached before.
     set ::HOG_SD_BUILD_DIR $globalSettings::build_dir
     Msg Info "Rebuilding SmartDesign hierarchy from [Relative $globalSettings::repo_path $rebuild_script]..."
-    source $rebuild_script
+    if {[catch {source $rebuild_script} rebuild_err]} {
+      # generate_component's design-rules-check failures (floating pins,
+      # incompatible bus interfaces, ...) are printed by Libero directly to
+      # its own message stream, not encoded into the Tcl error text - $rebuild_err
+      # here is typically empty, and the actual violations are already
+      # scrolled far behind by the time CREATE finishes reading the
+      # remaining HDL/constraint files. dump_drc_messages is Libero's own
+      # command for re-listing exactly what the last DRC run found; call it
+      # again here, bracketed clearly, so the real cause isn't lost in the log.
+      #
+      # Every exported top-level SmartDesign script (Libero's own "Export
+      # Component Description (Tcl)" output) sets a "sd_name" variable near
+      # the top, before anything that could fail. Tcl's "source" runs in the
+      # caller's scope - here, this proc's own local frame, since
+      # RebuildSmartDesign is a proc - so plain "set sd_name ..." in the
+      # sourced file becomes a LOCAL variable of THIS call, not ::sd_name;
+      # checked unqualified below, on purpose. It survives even though the
+      # script itself aborted partway through. If the failure happened in
+      # the top-level SmartDesign's own generate_component call (the common
+      # case), sd_name still names it correctly; get_root and
+      # synth_top_module are fallbacks for any other case.
+      set drc_component ""
+      if {[info exists sd_name] && $sd_name ne ""} {
+        set drc_component $sd_name
+      } elseif {![catch {set root_guess [get_root]} err_gr] && $root_guess ne ""} {
+        set drc_component $root_guess
+      } elseif {![catch {set root_guess $globalSettings::synth_top_module} err_stm] && $root_guess ne ""} {
+        set drc_component $root_guess
+      }
+      if {$drc_component ne ""} {
+        Msg CriticalWarning "SmartDesign rebuild failed - re-printing the DRC violations Libero found for '$drc_component', instead of leaving them buried under everything read since:"
+        catch {dump_drc_messages -component $drc_component}
+        Msg CriticalWarning "^^^ end of re-printed DRC violations for '$drc_component' ^^^"
+      } else {
+        Msg CriticalWarning "SmartDesign rebuild failed, and the failing component's name could not be determined to re-print its DRC violations. Check Libero's own output above for the actual error."
+      }
+      error $rebuild_err
+    }
     Msg Info "SmartDesign hierarchy rebuilt."
 
     # After rebuilding the SmartDesign, set the root so that organize_tool_files
@@ -287,6 +369,10 @@ proc RebuildSmartDesign {} {
     # scripts that don't root the design themselves.
     if {![catch {set current_root [get_root]} err] && $current_root ne ""} {
       Msg Info "Root already set by the rebuild script: $current_root"
+      # Remember it: adding the constraint files later triggers a
+      # build_design_hierarchy that clears the selected root, and
+      # organize_tool_files then refuses to run without one.
+      set globalSettings::libero_root $current_root
       return
     }
 
@@ -315,6 +401,7 @@ proc RebuildSmartDesign {} {
       Msg Error "Root verification failed after set_root: $err"
     } else {
       Msg Info "Root successfully set to: $verified_root"
+      set globalSettings::libero_root $verified_root
     }
   }
 }

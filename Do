@@ -123,6 +123,19 @@ if [ "$found" == 1 ]; then
 	Logger_Init "$*"
 	Logger $executable_path $hog_dir/Tcl/launch.tcl "$@"
 	Hog_exit
+    elif [ -t 1 ]; then
+        # Native Windows console apps (acttclsh/libero.exe) launched directly
+        # from git-bash/MSYS's mintty pty don't get a real Win32 console
+        # handle, and buffer/withhold their output until the process exits
+        # instead of streaming it live - the same reason piping to `tee` or
+        # redirecting to a file already "fixes" it for anyone doing that
+        # manually. Routing through a no-op `cat` stage forces a genuine pipe
+        # handle and restores live output. Only kicks in when stdout is an
+        # actual terminal (interactive use, no redirection); a caller who
+        # already pipes/redirects this script's own output is unaffected,
+        # since stdout wouldn't be a tty in that case.
+        $executable_path $hog_dir/Tcl/launch.tcl "$@" | cat
+        exit "${PIPESTATUS[0]}"
     else
         $executable_path $hog_dir/Tcl/launch.tcl "$@"
         exit $?

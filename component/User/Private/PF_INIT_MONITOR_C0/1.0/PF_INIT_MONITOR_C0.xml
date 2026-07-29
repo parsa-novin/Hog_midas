@@ -78,7 +78,7 @@
   <spirit:fileSets>
   <spirit:fileSet spirit:fileSetId="HDL_FILESET">
     <spirit:file>
-      <spirit:name>/home/pnovin/midas_fpga/src/hdl/smm-ethercat/generated_cores/PF_INIT_MONITOR_C0/PF_INIT_MONITOR_C0.v</spirit:name>
+      <spirit:name>C:/Users/pnovin/Documents/midas_fpga/src/hdl/smm-ethercat/generated_cores/PF_INIT_MONITOR_C0/PF_INIT_MONITOR_C0.v</spirit:name>
       <spirit:fileType>VHDLSource</spirit:fileType>
     <spirit:vendorExtensions></spirit:vendorExtensions>
     </spirit:file>

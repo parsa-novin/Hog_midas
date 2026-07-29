@@ -484,12 +484,40 @@ proc AddHogFiles {libraries properties filesets} {
             # Check for valid constrain files
             set con_ext [file extension $con_file]
             if {[IsInList [file extension $con_file] $vld_exts]} {
+              set props [DictGet $properties $con_file]
+
               set option [string map {. -} $con_ext]
               set option [string map {fdc net_fdc} $option]
               set option [string map {pdc io_pdc} $option]
-              create_links -convert_EDN_to_HDL 0 -library {work} $option $con_file
-
-              set props [DictGet $properties $con_file]
+              if {$con_ext == ".pdc"} {
+                # A .pdc file can hold either I/O constraints or floorplan
+                # ones (set_location, region assignments, ...) - Libero
+                # requires the right import flag, -io_pdc or -fp_pdc, and
+                # rejects the other with "PDCPF-302: Accept only I/O PDC
+                # command" (or the equivalent for -fp_pdc). There's no
+                # static list of commands to classify on that would stay
+                # correct across Libero versions/families, and no directory
+                # or naming convention that holds across projects, so
+                # instead of guessing: try -io_pdc (the common case) first,
+                # and only fall back to -fp_pdc if Libero itself rejects it.
+                # An explicit "fp" property in the .con list file
+                # (e.g. "path/to/file.pdc fp") skips straight to -fp_pdc,
+                # for when the file is known upfront and the wasted attempt
+                # isn't wanted.
+                if {[lsearch $props "fp"] >= 0} {
+                  set option "-fp_pdc"
+                }
+                if {[catch {create_links -convert_EDN_to_HDL 0 -library {work} $option $con_file} err]} {
+                  if {$option eq "-io_pdc"} {
+                    Msg Info "$con_file was not accepted as an I/O PDC file, retrying as a floorplan PDC file..."
+                    create_links -convert_EDN_to_HDL 0 -library {work} -fp_pdc $con_file
+                  } else {
+                    error $err
+                  }
+                }
+              } else {
+                create_links -convert_EDN_to_HDL 0 -library {work} $option $con_file
+              }
 
               if {$con_ext == ".sdc"} {
                 if {[lsearch $props "notiming"] >= 0} {
@@ -686,6 +714,18 @@ proc AddHogFiles {libraries properties filesets} {
 
   # Add constraints to workflow in Libero
   if {[IsLibero]} {
+    # organize_tool_files hard-requires a root to be selected, but the
+    # build_design_hierarchy that runs once the constraint files have been
+    # linked clears the selection again - so a root that was correctly set
+    # earlier (by RebuildSmartDesign, for a SmartDesign top) is gone by the
+    # time we get here. Re-assert it.
+    if {[catch {get_root}] && [info exists globalSettings::libero_root]
+      && $globalSettings::libero_root ne ""} {
+      Msg Info "Re-selecting root $globalSettings::libero_root before organize_tool_files..."
+      if {[catch {set_root -module $globalSettings::libero_root} err]} {
+        Msg Warning "Could not re-select root $globalSettings::libero_root: $err"
+      }
+    }
     if {$synth_conf == 1} {
       Msg Info $synth_conf_command
       eval $synth_conf_command
@@ -727,7 +767,7 @@ proc ALLOWED_PROPS {} {
     ] \
     ".sdc" [list "notiming" "nosynth" "noplace"] \
     ".elf" [list "scoped_to_ref" "scoped_to_cells" "nosim" "noimpl"] \
-    ".pdc" [list "nosynth" "noplace"] \
+    ".pdc" [list "nosynth" "noplace" "fp"] \
     ".lpf" [list "enable"]]
 }
 

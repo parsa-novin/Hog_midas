@@ -76,8 +76,8 @@ set default_commands {
   \^PACK$ {#proj
     set do_pack 1
   # NAME: PACK
-  # DESCRIPTION: Extract HDL files, constraints, and SmartDesign from a Libero project into Hog file structure. Use -recreate to overwrite existing Top directory.
-  # OPTIONS: verbose, recreate, prjx.arg
+  # DESCRIPTION: Extract HDL files, constraints, and SmartDesign from a Libero project directory into Hog file structure. Requires -top. Use -recreate to overwrite existing Top directory.
+  # OPTIONS: verbose, recreate, top.arg, project_dir.arg
   }
 
   \^I(MPL(EMENT(ATION)?)?)?$ {#proj
@@ -260,7 +260,7 @@ set parameters {
   {generate        "For IPbus XMLs, it will re create the VHDL address decode files."}
   {dst_dir.arg  "" "For reports, IPbus XMLs, set the destination folder (default is in the ./bin folder)."}
   {output.arg   "" "For tree hierarchy mode, set the output file (default is console)."}
-  {top.arg      "" "For tree hierarchy mode, set the top module (default is the top module defined in hog.conf)."}
+  {top.arg      "" "For tree hierarchy mode, set the top module (default is the top module defined in hog.conf). For PACK, the name of the top module / SmartDesign (required)."}
   {ignore.arg   "" "For tree hierarchy mode, filter's the printed hierarchy to exclude modules that match the given string."}
   {include_ieee "" "For tree hierarchy mode, include IEEE/STD libraries in the printed hierarchy. (Default 0)"}
   {include_gen_prods "" "For tree hierarchy mode, include IP generated products in the printed hierarchy. (Default 0)"}
@@ -271,5 +271,5 @@ set parameters {
   {simcheck         "If set, checks also the version of the simulation files."}
   {ci_run           "If set, CheckProjVer will run only on the projects that are active in the CI's pipeline.\n\
   It requires the glab or the gh package installed."}
-  {prjx.arg      "" "For PACK command, specify the path to the .prjx file. If not specified, searches for *.prjx in Projects/<project_name>/."}
+  {project_dir.arg "" "For PACK command, specify the source Libero project directory to pack from. If not specified, uses Projects/<project_name>/."}
 }

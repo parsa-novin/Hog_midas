@@ -565,13 +565,22 @@ if {$cmd == -1} {
       set force_overwrite 1
     }
 
-    # Get prjx file path if specified
-    set prjx_path ""
-    if {$options(prjx) ne ""} {
-      set prjx_path $options(prjx)
+    # Get the source Libero project directory if specified
+    set source_dir ""
+    if {$options(project_dir) ne ""} {
+      set source_dir $options(project_dir)
     }
 
-    set ret [PackLiberoProject $project_name $repo_path $force_overwrite $prjx_path]
+    # The top module has to be given explicitly: PACK reads the project
+    # directory rather than the .prjx, and nothing on disk marks the design
+    # root unambiguously.
+    if {$options(top) eq ""} {
+      Msg Error "PACK needs the top module name. Run it as:\
+                 ./Hog/Do PACK $project_name -top <module>"
+      exit 1
+    }
+
+    set ret [PackLiberoProject $project_name $repo_path $options(top) $force_overwrite $source_dir]
     exit $ret
   }
 
