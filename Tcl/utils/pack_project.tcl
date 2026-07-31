@@ -569,7 +569,7 @@ proc PackLiberoProject {project_name repo_path top_module {force 0} {source_dir 
                         # (Actel:SgCore:PF_INIT_MONITOR:2.0.308) or ones
                         # with the descriptor unpacked under fs/p0f0 but
                         # none of the generator/RTL filesets it references
-                        # (Actel:SystemBuilder:PF_SRAM_AHBL_AXI:1.2.111) -
+                        # (Actel:SystemBuilder:PF_SRAM_AHBL_AXI:1.2.116) -
                         # and create_and_configure_core rejects both with
                         # "Cannot find Spirit core configuration file".
                         # Complete entries always have at least one payload
@@ -615,12 +615,24 @@ proc PackLiberoProject {project_name repo_path top_module {force 0} {source_dir 
                         }
                     }
                     if {$gen_top ne ""} {
-                        Msg Warning "$cac_name ($cac_vlnv) has no cached catalog data beyond a bare descriptor,\
-                        so it's being packed as a static HDL core from this project's already-generated output\
-                        instead of a live Component. If $cac_name exposes any bus interfaces (BIFs) in the\
-                        canvas, connections to it will fail - re-run PACK once this core's full catalog data is\
-                        available (e.g. after building this design once with a Libero install/catalog that has\
-                        it) to get proper Component support instead."
+                        # CriticalWarning, not Warning: this core is getting the lossy static
+                        # fallback (create_hdl_core + bifs hand-reconstructed from its cached
+                        # .cxf) instead of a live create_and_configure_core Component. The bif
+                        # role/name/signal-map get recovered, but nothing else a live Component
+                        # would carry (e.g. address-space/memory-map references) does - if this
+                        # core is ever the deciding factor in a "not compatible" bus-interface
+                        # connect failure downstream, this is the line that explains why. Loud on
+                        # purpose so it's seen now, not rediscovered later from a DRC error.
+                        Msg CriticalWarning "$cac_name ($cac_vlnv) has no cached catalog data beyond a bare descriptor\
+                        (checked this project's own component/ cache, the per-user vault, and Libero's system-wide\
+                        vault - see HogFindCompleteVaultEntry in create_project.tcl), so it's being packed as a\
+                        static HDL core from this project's already-generated output instead of a live Component.\
+                        Its bus interfaces (BIFs) are reconstructed from its cached .cxf where possible, but this is\
+                        still not the genuine article - if $cac_name exposes any bus interfaces in the canvas and a\
+                        connection to it later fails as \"not compatible\", this is why. Re-run PACK once this\
+                        core's full generator data is available in one of the three locations above (e.g. after\
+                        building this design once with a Libero install/catalog that has it) to get proper\
+                        Component support instead."
                         set gen_dst "$repo_path/src/hdl/$project_name/generated_cores/$cac_name"
                         CopyDirectory $gen_dir $gen_dst
                         foreach hf [FindHdlFiles $gen_dst] {
@@ -658,7 +670,26 @@ proc PackLiberoProject {project_name repo_path top_module {force 0} {source_dir 
                                         $bif_xml -> bt_lib bt_name bt_vendor]} {
                                         continue
                                     }
-                                    set bif_role [expr {[string first "<slave/>" $bif_xml] >= 0 ? "slave" : "master"}]
+                                    # IP-XACT/SPIRIT interface modes are one of four self-closing
+                                    # tags: <master/>, <slave/>, <mirroredMaster/>, <mirroredSlave/>.
+                                    # A plain "does it contain <slave/>" check (the previous version
+                                    # of this line) can never match either mirrored variant - neither
+                                    # "<mirroredSlave/>" nor "<mirroredMaster/>" contains the literal
+                                    # substring "<slave/>" - so every mirrored bif silently became a
+                                    # plain "master" instead. Confirmed wrong in practice: MIV_ESS_C1's
+                                    # own .cxf declares APB_0_mINITIATOR as <mirroredMaster/> and every
+                                    # *_mTARGET bif as <mirroredSlave/> (the "m" prefix in those names
+                                    # is literally short for "mirrored"), and this path produced plain
+                                    # "master" for all of them.
+                                    if {[regexp {<mirroredMaster/>} $bif_xml]} {
+                                        set bif_role "mirroredMaster"
+                                    } elseif {[regexp {<mirroredSlave/>} $bif_xml]} {
+                                        set bif_role "mirroredSlave"
+                                    } elseif {[regexp {<slave/>} $bif_xml]} {
+                                        set bif_role "slave"
+                                    } else {
+                                        set bif_role "master"
+                                    }
                                     set map_entries [list]
                                     foreach {m csig bsig} [regexp -all -inline \
                                         {<componentSignalName>([^<]+)</componentSignalName><busSignalName>([^<]+)</busSignalName>} \
